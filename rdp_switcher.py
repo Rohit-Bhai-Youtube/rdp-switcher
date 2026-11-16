@@ -78,8 +78,8 @@ CLOSEALL_DOT = "#FF6B81"        # Soft rose accent for Close All
 ISLAND_ON_ALL_MONITORS = False
 HOVER_PAD = 18
 TOP_EDGE_HOT = True
-TOP_HOT_ZONE = 22
-HIDE_DELAY = 0                  # cursor hate hi band (koi grace nahi)
+TOP_HOT_ZONE = 34
+HIDE_DELAY = 0.30               # 300ms grace period prevents flicker with modded top bars
 INSTANT_HIDE = False            # False = collapse bhi expand jaisi smooth animation
 REFRESH_MS = 1200               # less frequent = less work on the UI thread
 POLL_MS = 40                    # snappier hover/leave detection
@@ -190,8 +190,16 @@ SW_MAXIMIZE = 3
 SW_MINIMIZE = 6
 SWP_NOSIZE = 0x0001
 SWP_NOMOVE = 0x0002
+SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
+SWP_FRAMECHANGED = 0x0020
 SWP_SHOWWINDOW = 0x0040
+SWP_NOOWNERZORDER = 0x0200
+
+WM_SYSCOMMAND = 0x0112
+SC_MAXIMIZE = 0xF030
+SC_RESTORE = 0xF120
+MONITOR_DEFAULTTONEAREST = 2
 
 GWL_EXSTYLE = -20
 WS_EX_NOACTIVATE = 0x08000000
@@ -249,6 +257,30 @@ user32.keybd_event.argtypes = [wintypes.BYTE, wintypes.BYTE,
 user32.PostMessageW.argtypes = [HWND, wintypes.UINT, wintypes.WPARAM,
                                 wintypes.LPARAM]
 user32.PostMessageW.restype = wintypes.BOOL
+user32.SendMessageW.argtypes = [HWND, wintypes.UINT, wintypes.WPARAM,
+                                wintypes.LPARAM]
+user32.SendMessageW.restype = wintypes.LPARAM
+
+class RECT(ctypes.Structure):
+    _fields_ = [
+        ("left", ctypes.c_long),
+        ("top", ctypes.c_long),
+        ("right", ctypes.c_long),
+        ("bottom", ctypes.c_long),
+    ]
+
+class MONITORINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("rcMonitor", RECT),
+        ("rcWork", RECT),
+        ("dwFlags", wintypes.DWORD),
+    ]
+
+user32.MonitorFromWindow.argtypes = [HWND, wintypes.DWORD]
+user32.MonitorFromWindow.restype = ctypes.c_void_p
+user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.POINTER(MONITORINFO)]
+user32.GetMonitorInfoW.restype = wintypes.BOOL
 user32.GetWindowLongW.argtypes = [HWND, ctypes.c_int]
 user32.GetWindowLongW.restype = ctypes.c_uint32
 user32.SetWindowLongW.argtypes = [HWND, ctypes.c_int, ctypes.c_uint32]
@@ -644,14 +676,44 @@ def chip_shape(w, h, r, p):
     return _SHAPE_CACHE[key]
 
 
+def make_fullscreen_rdp(hwnd):
+    """Ensure RDP covers the entire physical monitor, ignoring modded taskbars / docks."""
+    hwnd = int(hwnd)
+    if not user32.IsWindow(hwnd):
+        return
+    # 1. Restore if minimized so it becomes active
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, SW_RESTORE)
+
+    # 2. Send native WM_SYSCOMMAND SC_MAXIMIZE (triggers mstsc internal full-screen engine)
+    user32.SendMessageW(hwnd, WM_SYSCOMMAND, SC_MAXIMIZE, 0)
+
+    # 3. Pin directly to physical monitor rect (covers top taskbar & bottom dock completely)
+    hmon = user32.MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
+    if hmon:
+        mi = MONITORINFO()
+        mi.cbSize = ctypes.sizeof(MONITORINFO)
+        if user32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+            mon_l = mi.rcMonitor.left
+            mon_t = mi.rcMonitor.top
+            mon_w = mi.rcMonitor.right - mi.rcMonitor.left
+            mon_h = mi.rcMonitor.bottom - mi.rcMonitor.top
+            user32.SetWindowPos(hwnd, HWND_TOP, mon_l, mon_t, mon_w, mon_h,
+                                SWP_SHOWWINDOW | SWP_FRAMECHANGED)
+
+
 def activate(hwnd, maximize=True):
-    """Restore (if minimized), optionally maximize, and bring to foreground."""
+    """Restore (if minimized), maximize to TRUE fullscreen over any modded bar/dock,
+    and bring to foreground."""
     hwnd = int(hwnd)
     if not user32.IsWindow(hwnd):
         return False
-    if user32.IsIconic(hwnd):
-        user32.ShowWindow(hwnd, SW_RESTORE)
-    user32.ShowWindow(hwnd, SW_MAXIMIZE if maximize else SW_SHOW)
+    if maximize:
+        make_fullscreen_rdp(hwnd)
+    else:
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, SW_RESTORE)
+        user32.ShowWindow(hwnd, SW_SHOW)
 
     cur = kernel32.GetCurrentThreadId()
     fg = user32.GetForegroundWindow()
@@ -771,7 +833,7 @@ class Bar:
         try:
             user32.SetWindowPos(HWND(self.hwnd_top), HWND_TOPMOST,
                                 int(x), int(y), int(w), int(h),
-                                SWP_NOACTIVATE | SWP_SHOWWINDOW)
+                                SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER)
         except Exception:
             pass
         self._shape(w, h)
@@ -799,8 +861,7 @@ class Bar:
     def raise_bar(self):
         try:
             user32.SetWindowPos(HWND(self.hwnd_top), HWND_TOPMOST, 0, 0, 0, 0,
-                                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW |
-                                SWP_NOACTIVATE)
+                                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
         except Exception:
             pass
 
@@ -1296,8 +1357,8 @@ class App:
 
     def pick(self, hwnd):
         log_action("RDP click hwnd=%s" % hwnd)
-        activate(hwnd)
-        self.root.after(200, self.raise_bars)
+        activate(hwnd, maximize=MAXIMIZE_ON_SWITCH)
+        self.root.after(150, self.raise_bars)
 
     def cycle_rdp(self, direction):
         if not self.entries:
@@ -1528,19 +1589,12 @@ class App:
             if hot:
                 self.last_hot = now
                 self.set_shown(True)
-                # Fullscreen RDP Topmost Lock: keeps the notch firmly above full-screen mstsc
-                if now - self.last_raise >= 0.35:
-                    self.last_raise = now
-                    self.raise_bars()
             elif any(b.shown for b in self.bars) and now - self.last_hot > HIDE_DELAY:
                 self.set_shown(False)
 
             animating = any(b.anim_job for b in self.bars)
             if not animating and now - self.last_refresh >= REFRESH_MS / 1000.0:
                 self.refresh()
-            if not animating and now - self.last_raise >= 2.0:
-                self.last_raise = now
-                self.raise_bars()
         except Exception as e:
             log_action(f"tick error: {e}")
 
