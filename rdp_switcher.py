@@ -41,7 +41,7 @@ ISLAND_MARGIN_Y = 0             # 0 = flush / chipka with the top edge
 ISLAND_COLLAPSED_W = 152
 ISLAND_COLLAPSED_H = 24
 ISLAND_EXPANDED_H = 66
-ISLAND_MIN_W = 400
+ISLAND_MIN_W = 540
 ISLAND_MAX_W = 0                # 0 = auto / adapts to monitor width; or set positive int to cap
 ISLAND_PAD_X = 12
 ARROW_W = 28                    # width of pagination arrows when RDP count > visible slots
@@ -96,14 +96,14 @@ BAR_HEIGHT = 36
 HOT_ZONE = 14
 
 # iOS-ish palette ------------------------------------------------------------
-GRAD_TOP = (38, 48, 72)
-GRAD_MID = (16, 21, 33)
-GRAD_BOT = (7, 9, 15)
-RIM_1 = "#8AAAE5"
-RIM_2 = "#3E527A"
-RIM_BOT = "#03050A"
-RIM_SIDE = "#485D88"            # curved side outline of the capsule
-RIM_W = 2                       # island outline thickness
+GRAD_TOP = (22, 28, 42)
+GRAD_MID = (12, 16, 26)
+GRAD_BOT = (6, 8, 14)
+RIM_1 = "#2C3A52"
+RIM_2 = "#1E2738"
+RIM_BOT = "#0E1420"
+RIM_SIDE = "#1E2738"            # subtle matching glass contour
+RIM_W = 1                       # island outline thickness
 BTN_CORNER_R = 12               # chip corner radius -> straight top/bottom edges
 BTN_RIM_DARKEN = 0.50           # DARK border (mix toward near-black)
 BTN_BORDER_PX = 3               # button border thickness
@@ -777,22 +777,14 @@ class Bar:
         self._shape(w, h)
 
     def _shape(self, w, h):
-        """Region on the REAL top-level HWND (plus children) for hit-testing
-        and to make the DWM shadow follow the pill. Actual corner transparency
-        comes from the color key in _background().
-        """
+        """Corner transparency and mouse hit-testing are handled natively
+        by DWM through TRANSPARENT_KEY, completely eliminating 1-bit staircase
+        jagged region edges."""
         try:
             targets = [HWND(self.hwnd_top), owned_hwnd(self.win),
                        HWND(widget_handle(self.canvas))]
-            if FULL_WIDTH_BAR:
-                for t in targets:
-                    user32.SetWindowRgn(t, None, True)
-            else:
-                r = max(4, h // 2)
-                for t in targets:
-                    hrgn = gdi32.CreateRoundRectRgn(0, 0, w + 1, h + 1, r, r)
-                    if hrgn:
-                        user32.SetWindowRgn(t, hrgn, True)
+            for t in targets:
+                user32.SetWindowRgn(t, None, True)
         except Exception:
             pass
 
@@ -936,9 +928,6 @@ class Bar:
                     buf += b"\x00\x00\x00\x00"
                     continue
                 col = tuple(br[i] + (fr[i] - br[i]) * a_in for i in range(3))
-                if p + 2 <= y <= p + 4 and p + 14 <= x <= W - p - 14:
-                    col = tuple(col[i] + (255 - col[i]) * 0.30
-                                for i in range(3))
                 buf += bytes((int(col[0]), int(col[1]), int(col[2]),
                               int(a_out * 255)))
         photo = tk.PhotoImage(
@@ -977,16 +966,9 @@ class Bar:
             inset = r - (max(0.0, r * r - (r - d) ** 2)) ** 0.5
             c.create_rectangle(inset, yy, w - inset, yy + 1,
                                fill=hexcol(col), outline="", tags=("bg",))
-        c.create_line(r, 1, w - r, 1, fill=RIM_1, width=RIM_W,
-                      tags=("bg",))
-        c.create_line(r + 5, 2, w - r - 5, 2, fill=RIM_2, tags=("bg",))
-        c.create_line(r, h - 2, w - r, h - 2, fill=RIM_BOT, tags=("bg",))
-        c.create_arc(0, 0, 2 * r, h, start=90, extent=180,
-                     style="arc", outline=RIM_SIDE, width=RIM_W,
-                     tags=("bg",))
-        c.create_arc(w - 2 * r, 0, w, h, start=-90, extent=180,
-                     style="arc", outline=RIM_SIDE, width=RIM_W,
-                     tags=("bg",))
+        # Subtle 1px specular highlight at top & soft shadow hairline at bottom
+        c.create_line(r, 0, w - r, 0, fill=RIM_1, width=1, tags=("bg",))
+        c.create_line(r, h - 1, w - r, h - 1, fill=RIM_BOT, width=1, tags=("bg",))
         c.tag_lower("bg")        # keep morphing background BEHIND the chips
 
     def _glow_dot(self, cx, cy):
@@ -1058,11 +1040,9 @@ class Bar:
             x2 = x1 + width
             self.chip(x1, by1, x2, by2, base, (hit, pill),
                       darken(base, BTN_RIM_DARKEN))
-            c.create_oval(x1 + 9, h / 2 - 4, x1 + 17, h / 2 + 4,
-                          fill=badge, outline="", tags=(hit,))
-            c.create_text((x1 + x2) / 2 + 4, h / 2 - 9,
+            c.create_text((x1 + x2) / 2.0, h / 2 - 9,
                           text=label, fill=FG, font=FONT_BOLD, tags=(hit,))
-            c.create_text((x1 + x2) / 2 + 4, h / 2 + 9,
+            c.create_text((x1 + x2) / 2.0, h / 2 + 9,
                           text=sub, fill=SUB, font=FONT_IP, tags=(hit,))
             c.tag_bind(hit, "<Button-1>", lambda _ev, f=cmd: f())
             return x2 + self.BTN_GAP
@@ -1085,9 +1065,10 @@ class Bar:
         if not n:
             self.visible_slots = 0
             self.scroll_offset = 0
-            c.create_text(x, h / 2, anchor="w",
-                          text="koi RDP window nahi mili",
-                          fill=MUTED, font=FONT)
+            mid_x = (x + limit_x) / 2.0
+            c.create_text(mid_x, h / 2, anchor="center",
+                          text="No Active RDP Sessions",
+                          fill="#7B8DA8", font=FONT_BOLD)
         elif n <= direct_slots:
             # All RDPs fit on screen directly without scroll arrows
             self.visible_slots = n
@@ -1191,7 +1172,7 @@ class Bar:
         raw = 2 * ISLAND_PAD_X + 16 + 48          # pad + glow dot + "RDP n"
         if MYPC_ENABLED:
             raw += MYPC_PILL_W + self.BTN_GAP + 8   # + separator gap
-        raw += n * (self.BTN_W + self.BTN_GAP)    # RDP pills
+        raw += max(220, n * (self.BTN_W + self.BTN_GAP))    # RDP pills or clean empty state
         if CLOSEALL_ENABLED:
             raw += 18 + CLOSEALL_PILL_W           # separator gap + Close All pill
         if EXIT_ENABLED:
