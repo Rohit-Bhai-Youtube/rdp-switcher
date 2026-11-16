@@ -903,6 +903,8 @@ class Bar:
             combos.append((MYPC_PILL_W, "#245A46"))
         if CLOSEALL_ENABLED:
             combos.append((CLOSEALL_PILL_W, CLOSEALL_TINT))
+        if EXIT_ENABLED:
+            combos.append((EXIT_PILL_W, EXIT_TINT))
         combos.append((ARROW_W, "#1B2A4A"))
         for base in BTN_PALETTE:
             combos.append((self.BTN_W, base))
@@ -1031,17 +1033,25 @@ class Bar:
                           fill=ACCENT, font=FONT_BOLD)
         x += 48
 
-        # right edge: Close All is the LAST pill (no reload / close buttons)
+        # right edge: Close All and Exit pills
         rx = w - ISLAND_PAD_X
+        if EXIT_ENABLED:
+            ex2 = rx
+            ex1 = ex2 - EXIT_PILL_W
+            next_rx = ex1 - self.BTN_GAP
+        else:
+            ex1 = ex2 = rx
+            next_rx = rx
+
         if CLOSEALL_ENABLED:
-            ca2 = rx
+            ca2 = next_rx
             ca1 = ca2 - CLOSEALL_PILL_W
             sep_x = ca1 - 10
             limit_x = ca1 - 18
         else:
-            ca1 = ca2 = rx
-            sep_x = rx - 10
-            limit_x = rx - 18
+            ca1 = ca2 = next_rx
+            sep_x = next_rx - 10
+            limit_x = next_rx - 18
         by1, by2 = (h - self.BTN_H) / 2.0, (h + self.BTN_H) / 2.0
 
         def action_pill(x1, width, base, badge, label, sub, hit, pill, cmd):
@@ -1511,44 +1521,47 @@ class App:
                 self.held_prev = False
 
     def tick(self):
-        self.poll_hotkeys()
-        now = time.monotonic()
-        x, y = cursor_pos()
+        try:
+            self.poll_hotkeys()
+            now = time.monotonic()
+            x, y = cursor_pos()
 
-        hot = False
-        for b in self.bars:
-            if FULL_WIDTH_BAR:
-                l, t, r, _ = b.rect
-                limit = t + (BAR_HEIGHT if b.shown else HOT_ZONE)
-                if l <= x < r and t - 10 <= y <= limit:
-                    hot = True
-            else:
-                ix, iy, iw, ih = b.cur_rect
-                if (ix - HOVER_PAD <= x <= ix + iw + HOVER_PAD and
-                        iy - HOVER_PAD <= y <= iy + ih + HOVER_PAD):
-                    hot = True
-                if TOP_EDGE_HOT and (b.left <= x <= ix + iw + 40) and \
-                        (b.top <= y <= b.top + TOP_HOT_ZONE):
-                    hot = True
+            hot = False
+            for b in self.bars:
+                if FULL_WIDTH_BAR:
+                    l, t, r, _ = b.rect
+                    limit = t + (BAR_HEIGHT if b.shown else HOT_ZONE)
+                    if l <= x < r and t - 10 <= y <= limit:
+                        hot = True
+                else:
+                    ix, iy, iw, ih = b.cur_rect
+                    if (ix - HOVER_PAD <= x <= ix + iw + HOVER_PAD and
+                            iy - HOVER_PAD <= y <= iy + ih + HOVER_PAD):
+                        hot = True
+                    if TOP_EDGE_HOT and (b.left <= x <= ix + iw + 40) and \
+                            (b.top <= y <= b.top + TOP_HOT_ZONE):
+                        hot = True
+                if hot:
+                    break
+
             if hot:
-                break
+                self.last_hot = now
+                self.set_shown(True)
+                # Fullscreen RDP Topmost Lock: keeps the notch firmly above full-screen mstsc
+                if now - self.last_raise >= 0.35:
+                    self.last_raise = now
+                    self.raise_bars()
+            elif any(b.shown for b in self.bars) and now - self.last_hot > HIDE_DELAY:
+                self.set_shown(False)
 
-        if hot:
-            self.last_hot = now
-            self.set_shown(True)
-            # Fullscreen RDP Topmost Lock: keeps the notch firmly above full-screen mstsc
-            if now - self.last_raise >= 0.35:
+            animating = any(b.anim_job for b in self.bars)
+            if not animating and now - self.last_refresh >= REFRESH_MS / 1000.0:
+                self.refresh()
+            if not animating and now - self.last_raise >= 2.0:
                 self.last_raise = now
                 self.raise_bars()
-        elif any(b.shown for b in self.bars) and now - self.last_hot > HIDE_DELAY:
-            self.set_shown(False)
-
-        animating = any(b.anim_job for b in self.bars)
-        if not animating and now - self.last_refresh >= REFRESH_MS / 1000.0:
-            self.refresh()
-        if not animating and now - self.last_raise >= 2.0:
-            self.last_raise = now
-            self.raise_bars()
+        except Exception as e:
+            log_action(f"tick error: {e}")
 
         self.root.after(POLL_MS, self.tick)
 
@@ -1560,6 +1573,15 @@ class App:
 
     def run(self):
         self.root.mainloop()
+
+
+def check_single_instance(name="Global\\RDP_Switcher_Exclusive_Mutex"):
+    kernel32 = ctypes.windll.kernel32
+    ERROR_ALREADY_EXISTS = 183
+    mutex = kernel32.CreateMutexW(None, False, name)
+    if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+        return None
+    return mutex
 
 
 def main():
@@ -1575,7 +1597,13 @@ def main():
             print("RDP %d  %s  hwnd=%s  proc=%s  class=%s  title=%r"
                   % (i, w.ip, w.hwnd, w.proc, w.cls, w.title))
         return
-    App().run()
+    mutex = check_single_instance()
+    if not mutex:
+        sys.exit(0)
+    try:
+        App().run()
+    except Exception as e:
+        log_action(f"App fatal error: {e}")
 
 
 if __name__ == "__main__":
